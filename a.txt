@@ -1,0 +1,13 @@
+Benchmark started at 2025-11-06 17:43:22
+
+=== Batch 1 at 2025-11-d 17:43:43 ===
+Requests this batch: 5
+Successful: 0 / 5
+Avg total time: 0.0000 sec
+--- End Batch 1 ---
+
+=== Batch 2 at 2025-11-d 17:44:06 ===
+Requests this batch: 5
+Successful: 0 / 5
+Avg total time: 0.0000 sec
+--- End Batch 2 ---
