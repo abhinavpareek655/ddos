@@ -10,36 +10,34 @@ TOTAL_REQUESTS = 25
 CONCURRENCY = 5
 COOLDOWN = 2
 TIMEOUT = 120
-
-# Find what network your server is using
-# Replace 'bridge' with your server's network name if different
-SERVER_NETWORK = "server_default"  # Common options: bridge, host, or custom network name
+SERVER_NETWORK = "server_default"
 
 def make_request_docker(req_id):
     container_name = f"bench_req_{req_id}_{int(time.time() * 1000)}"
 
     try:
-        # 1️⃣ Create container but do not run curl yet
+        # Create and start container
         subprocess.run([
-            "docker", "create",
+            "docker", "run", "-d",
             "--name", container_name,
             "--network", SERVER_NETWORK,
             "curlimages/curl:latest",
-            "sleep", "10"  # keep container alive for exec
-        ], check=True)
+            "sleep", "120"
+        ], check=True, capture_output=True)
 
-        # 2️⃣ Inspect container to get IP BEFORE running curl
+        # Wait briefly for network setup
+        time.sleep(0.2)
+
+        # Get container IP after it's running
         inspect = subprocess.run(
             ["docker", "inspect", container_name],
             capture_output=True, text=True, check=True
         )
         inspect_json = json.loads(inspect.stdout)[0]
-        container_ip = list(inspect_json["NetworkSettings"]["Networks"].values())[0]["IPAddress"]
+        networks = inspect_json["NetworkSettings"]["Networks"]
+        container_ip = list(networks.values())[0].get("IPAddress", "not_assigned")
 
-        # 3️⃣ Start container
-        subprocess.run(["docker", "start", container_name], check=True)
-
-        # 4️⃣ Execute curl inside container
+        # Execute curl
         curl_cmd = [
             "docker", "exec", container_name,
             "curl",
@@ -54,10 +52,11 @@ def make_request_docker(req_id):
         result = subprocess.run(curl_cmd, capture_output=True, text=True)
         elapsed = time.perf_counter() - start
 
-        # 5️⃣ Remove container manually
-        subprocess.run(["docker", "rm", "-f", container_name], check=False)
+        # Cleanup
+        subprocess.run(["docker", "rm", "-f", container_name], 
+                      check=False, capture_output=True)
 
-        # 6️⃣ Parse curl output
+        # Parse result
         if result.returncode == 0:
             try:
                 data = json.loads(result.stdout)
@@ -76,7 +75,7 @@ def make_request_docker(req_id):
                     "time": elapsed,
                     "size": 0,
                     "container_ip": container_ip,
-                    "error": "Invalid JSON"
+                    "error": "Invalid JSON response"
                 }
 
         return {
@@ -85,10 +84,12 @@ def make_request_docker(req_id):
             "time": elapsed,
             "size": 0,
             "container_ip": container_ip,
-            "error": result.stderr
+            "error": result.stderr or "Request failed"
         }
 
     except Exception as e:
+        subprocess.run(["docker", "rm", "-f", container_name], 
+                      check=False, capture_output=True)
         return {
             "id": req_id,
             "status": "error",
@@ -99,61 +100,56 @@ def make_request_docker(req_id):
         }
 
 # === Main Execution ===
-print("=" * 60)
-print("Docker-based Benchmark with Different Source IPs")
-print("=" * 60)
+print("Docker Benchmark - Different Source IPs")
+print("-" * 60)
 
-# Check if Docker is available
+# Check Docker
 try:
-    result = subprocess.run(["docker", "--version"], capture_output=True, check=True, text=True)
-    print(f"✓ Docker found: {result.stdout.strip()}")
+    result = subprocess.run(["docker", "--version"], 
+                          capture_output=True, check=True, text=True)
+    print(f"Docker: {result.stdout.strip()}")
 except:
-    print("❌ Docker not found. Please install Docker first.")
+    print("ERROR: Docker not found")
     exit(1)
 
-# Check if curl image is available
-print("Checking for curl image...")
-try:
-    subprocess.run(["docker", "pull", "curlimages/curl:latest"], 
-                  capture_output=True, check=True)
-    print("✓ Curl image ready")
-except:
-    print("⚠️  Warning: Could not pull curl image, will try to use cached version")
+# Pull curl image
+print("Pulling curl image...")
+subprocess.run(["docker", "pull", "curlimages/curl:latest"], 
+              capture_output=True, check=True)
 
-# Test network connectivity
-print(f"\nTesting connection to {URL}...")
+# Test connection
+print(f"Testing connection to {URL}...")
 test_result = make_request_docker(0)
 if test_result["status"] == 200:
-    print(f"✓ Server reachable (response time: {test_result['time']:.3f}s)\n")
-elif "error" in test_result and test_result["error"]:
-    print(f"⚠️  Connection test failed: {test_result['error']}")
-    print(f"   Make sure:")
-    print(f"   1. Your server container is running")
-    print(f"   2. SERVER_NETWORK is set correctly (current: '{SERVER_NETWORK}')")
-    print(f"   3. URL is correct (current: '{URL}')\n")
-    response = input("Continue anyway? (y/n): ")
+    print(f"Connection OK (IP: {test_result['container_ip']}, Time: {test_result['time']:.3f}s)")
+else:
+    print(f"WARNING: Connection test failed")
+    print(f"Error: {test_result.get('error', 'Unknown')}")
+    print(f"Check: SERVER_NETWORK='{SERVER_NETWORK}', URL='{URL}'")
+    response = input("Continue? (y/n): ")
     if response.lower() != 'y':
         exit(1)
+
+print()
 
 # Initialize CSV
 with open("results.csv", "w", newline="") as f:
     csv.writer(f).writerow(["RequestID", "Status", "ResponseTime(s)", 
-                       "Size(bytes)", "ContainerIP", "Timestamp"])
+                           "Size(bytes)", "ContainerIP", "Timestamp"])
 
-print(f"Starting benchmark: {TOTAL_REQUESTS} requests, {CONCURRENCY} concurrent")
-print(f"Using network: {SERVER_NETWORK}\n")
+print(f"Running {TOTAL_REQUESTS} requests, {CONCURRENCY} concurrent")
+print(f"Network: {SERVER_NETWORK}\n")
 
 batches = (TOTAL_REQUESTS + CONCURRENCY - 1) // CONCURRENCY
 all_results = []
 request_counter = 0
 
 for batch_num in range(batches):
-    batch_start = request_counter
     batch_size = min(CONCURRENCY, TOTAL_REQUESTS - request_counter)
     
-    print(f"Batch {batch_num + 1}/{batches}: running {batch_size} requests...")
+    print(f"Batch {batch_num + 1}/{batches} ({batch_size} requests)...", end=" ", flush=True)
     
-    # Run batch with thread pool
+    # Run batch
     with ThreadPoolExecutor(max_workers=batch_size) as executor:
         futures = []
         for i in range(batch_size):
@@ -182,17 +178,16 @@ for batch_num in range(batches):
     rate_limited = [r for r in batch_results if r["status"] == 429]
     errors = [r for r in batch_results if r["status"] == "error"]
     
-    if rate_limited:
-        print(f"  ⚠️  {len(rate_limited)} requests rate-limited (429)")
-    if errors:
-        print(f"  ❌ {len(errors)} requests failed")
-        for err in errors[:2]:  # Show first 2 errors
-            print(f"     Error: {err.get('error', 'Unknown')}")
+    status_parts = []
     if successes:
         avg = sum(float(r["time"]) for r in successes) / len(successes)
-        print(f"  ✓ {len(successes)}/{batch_size} successful, avg {avg:.3f}s")
+        status_parts.append(f"{len(successes)} OK (avg {avg:.2f}s)")
+    if rate_limited:
+        status_parts.append(f"{len(rate_limited)} rate-limited")
+    if errors:
+        status_parts.append(f"{len(errors)} failed")
     
-    print()
+    print(", ".join(status_parts))
     
     if batch_num < batches - 1:
         time.sleep(COOLDOWN)
@@ -202,22 +197,27 @@ successes = [r for r in all_results if r["status"] == 200]
 rate_limited = [r for r in all_results if r["status"] == 429]
 errors = [r for r in all_results if r["status"] == "error"]
 
-print("\n" + "=" * 60)
+print("\n" + "-" * 60)
 if successes:
     times = [float(r["time"]) for r in successes]
-    print(f"✅ Complete! {len(successes)}/{TOTAL_REQUESTS} successful")
-    print(f"Min: {min(times):.3f}s | Max: {max(times):.3f}s | Avg: {sum(times)/len(times):.3f}s")
+    print(f"Complete: {len(successes)}/{TOTAL_REQUESTS} successful")
+    print(f"Time - Min: {min(times):.3f}s, Max: {max(times):.3f}s, Avg: {sum(times)/len(times):.3f}s")
     if rate_limited:
-        print(f"⚠️  {len(rate_limited)} requests were rate-limited")
+        print(f"Rate-limited: {len(rate_limited)}")
     if errors:
-        print(f"❌ {len(errors)} requests failed")
+        print(f"Failed: {len(errors)}")
+        if errors:
+            print("\nFirst error samples:")
+            for err in errors[:3]:
+                if err.get('error'):
+                    print(f"  Req {err['id']}: {err['error']}")
 else:
-    print("❌ No successful requests")
+    print("FAILED: No successful requests")
     if errors:
-        print("\nCommon errors:")
+        print("\nErrors:")
         for err in errors[:5]:
             if err.get('error'):
-                print(f"  - {err['error']}")
+                print(f"  Req {err['id']}: {err['error']}")
 
-print(f"\nResults saved to results.csv")
-print("=" * 60)
+print(f"\nResults: results.csv")
+print("-" * 60)
