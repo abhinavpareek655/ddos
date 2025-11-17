@@ -16,40 +16,49 @@ TIMEOUT = 120
 SERVER_NETWORK = "server_default"  # Common options: bridge, host, or custom network name
 
 def make_request_docker(req_id):
-    """Run a single request in a Docker container and capture container IP."""
     container_name = f"bench_req_{req_id}_{int(time.time() * 1000)}"
-    
-    docker_cmd = [
-        "docker", "run", "--rm",
-        "--name", container_name,
-        "--network", SERVER_NETWORK,
-        "curlimages/curl:latest",
-        "-s", "-w", '{"status":%{http_code},"time":%{time_total},"size":%{size_download}}',
-        "-o", "/dev/null",
-        "--max-time", str(TIMEOUT),
-        "-H", "Accept-Encoding: gzip,default",
-        URL
-    ]
 
-    start = time.perf_counter()
     try:
-        result = subprocess.run(docker_cmd, capture_output=True, text=True,
-                                timeout=TIMEOUT + 5, check=False)
+        # 1️⃣ Create container but do not run curl yet
+        subprocess.run([
+            "docker", "create",
+            "--name", container_name,
+            "--network", SERVER_NETWORK,
+            "curlimages/curl:latest",
+            "sleep", "10"  # keep container alive for exec
+        ], check=True)
+
+        # 2️⃣ Inspect container to get IP BEFORE running curl
+        inspect = subprocess.run(
+            ["docker", "inspect", container_name],
+            capture_output=True, text=True, check=True
+        )
+        inspect_json = json.loads(inspect.stdout)[0]
+        container_ip = list(inspect_json["NetworkSettings"]["Networks"].values())[0]["IPAddress"]
+
+        # 3️⃣ Start container
+        subprocess.run(["docker", "start", container_name], check=True)
+
+        # 4️⃣ Execute curl inside container
+        curl_cmd = [
+            "docker", "exec", container_name,
+            "curl",
+            "-s", "-w", '{"status":%{http_code},"time":%{time_total},"size":%{size_download}}',
+            "-o", "/dev/null",
+            "--max-time", str(TIMEOUT),
+            "-H", "Accept-Encoding: gzip,default",
+            URL
+        ]
+
+        start = time.perf_counter()
+        result = subprocess.run(curl_cmd, capture_output=True, text=True)
         elapsed = time.perf_counter() - start
 
-        # --- NEW: Get IP using docker inspect ---
-        try:
-            inspect = subprocess.run(
-                ["docker", "inspect", container_name],
-                capture_output=True, text=True
-            )
-            inspect_json = json.loads(inspect.stdout)[0]
-            container_ip = list(inspect_json["NetworkSettings"]["Networks"].values())[0]["IPAddress"]
-        except:
-            container_ip = "unknown"
+        # 5️⃣ Remove container manually
+        subprocess.run(["docker", "rm", "-f", container_name], check=False)
 
-        # Parse curl output
-        if result.returncode == 0 and result.stdout:
+        # 6️⃣ Parse curl output
+        if result.returncode == 0:
             try:
                 data = json.loads(result.stdout)
                 return {
@@ -60,33 +69,33 @@ def make_request_docker(req_id):
                     "container_ip": container_ip,
                     "error": None
                 }
-            except json.JSONDecodeError:
+            except:
                 return {
                     "id": req_id,
                     "status": "error",
                     "time": elapsed,
                     "size": 0,
                     "container_ip": container_ip,
-                    "error": f"Invalid response: {result.stdout}"
+                    "error": "Invalid JSON"
                 }
-        else:
-            error_msg = result.stderr.strip() if result.stderr else "Container failed"
-            return {
-                "id": req_id,
-                "status": "error",
-                "time": elapsed,
-                "size": 0,
-                "container_ip": container_ip,
-                "error": error_msg
-            }
-    except subprocess.TimeoutExpired:
+
         return {
             "id": req_id,
-            "status": "timeout",
-            "time": TIMEOUT,
+            "status": "error",
+            "time": elapsed,
+            "size": 0,
+            "container_ip": container_ip,
+            "error": result.stderr
+        }
+
+    except Exception as e:
+        return {
+            "id": req_id,
+            "status": "error",
+            "time": None,
             "size": 0,
             "container_ip": "unknown",
-            "error": "Request timeout"
+            "error": str(e)
         }
 
 # === Main Execution ===
