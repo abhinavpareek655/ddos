@@ -5,61 +5,108 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # === Configuration ===
-URL = "http://10.50.2.92:5000/matmul"
+URL = "http://172.18.0.2:5000/matmul"  # Server container IP
 TOTAL_REQUESTS = 25
 CONCURRENCY = 5
 COOLDOWN = 2
 TIMEOUT = 120
 
-# Docker network configuration
-DOCKER_NETWORK = "bench_network"
-SUBNET = "172.20.0.0/16"
-IP_RANGE = "172.20.0.0/24"
+# Docker network configuration - use existing server network
+SERVER_NETWORK = "bridge"  # or the name of your server's network
+USE_EXISTING_NETWORK = True  # Set to True if server is on existing network
 
 def setup_docker_network():
-    """Create a Docker network with custom subnet."""
+    """Create a Docker network or use existing one."""
     print("Setting up Docker network...")
-    try:
-        # Remove existing network if it exists
-        subprocess.run(["docker", "network", "rm", DOCKER_NETWORK], 
+    
+    if USE_EXISTING_NETWORK:
+        # Find server's network
+        try:
+            result = subprocess.run([
+                "docker", "inspect", "-f", 
+                "{{range .NetworkSettings.Networks}}{{.NetworkID}}{{end}}",
+                "server_container_name"  # Replace with your server container name
+            ], capture_output=True, text=True, check=False)
+            
+            # Get network name from the server container
+            result = subprocess.run([
+                "docker", "network", "ls", "--format", "{{.Name}}"
+            ], capture_output=True, text=True, check=True)
+            
+            networks = result.stdout.strip().split('\n')
+            print(f"Available networks: {networks}")
+            
+            # Try to find the network with 172.18.x.x subnet
+            for net in networks:
+                inspect = subprocess.run([
+                    "docker", "network", "inspect", net, "-f", "{{.IPAM.Config}}"
+                ], capture_output=True, text=True, check=False)
+                
+                if "172.18" in inspect.stdout:
+                    print(f"✓ Using existing network '{net}' (172.18.x.x subnet)\n")
+                    return net
+            
+            # Default to bridge if nothing found
+            print(f"✓ Using default bridge network\n")
+            return "bridge"
+            
+        except Exception as e:
+            print(f"Using bridge network (error: {e})\n")
+            return "bridge"
+    else:
+        try:
+            # Remove existing network if it exists
+            subprocess.run(["docker", "network", "rm", "bench_network"], 
+                          capture_output=True, check=False)
+            
+            # Create new network with different subnet
+            subprocess.run([
+                "docker", "network", "create",
+                "--subnet", "172.25.0.0/16",
+                "--ip-range", "172.25.0.0/24",
+                "bench_network"
+            ], check=True, capture_output=True)
+            print(f"✓ Docker network 'bench_network' created\n")
+            return "bench_network"
+        except subprocess.CalledProcessError as e:
+            print(f"Error creating network: {e}")
+            print("Falling back to bridge network\n")
+            return "bridge"
+
+def cleanup_docker_network(network_name):
+    """Remove the Docker network if we created it."""
+    if not USE_EXISTING_NETWORK and network_name == "bench_network":
+        print("\nCleaning up Docker network...")
+        subprocess.run(["docker", "network", "rm", network_name], 
                       capture_output=True, check=False)
-        
-        # Create new network
-        subprocess.run([
-            "docker", "network", "create",
-            "--subnet", SUBNET,
-            "--ip-range", IP_RANGE,
-            DOCKER_NETWORK
-        ], check=True, capture_output=True)
-        print(f"✓ Docker network '{DOCKER_NETWORK}' created\n")
-    except subprocess.CalledProcessError as e:
-        print(f"Error creating network: {e}")
-        exit(1)
+        print("✓ Cleanup complete")
+    else:
+        print("\n✓ Using existing network, no cleanup needed")
 
-def cleanup_docker_network():
-    """Remove the Docker network."""
-    print("\nCleaning up Docker network...")
-    subprocess.run(["docker", "network", "rm", DOCKER_NETWORK], 
-                  capture_output=True, check=False)
-    print("✓ Cleanup complete")
-
-def make_request_docker(req_id, ip_address):
+def make_request_docker(req_id, ip_address, network_name):
     """Run a single request in a Docker container with specific IP."""
     container_name = f"bench_req_{req_id}"
     
-    # Docker command to run curl in alpine container
+    # For existing networks, we can't always assign specific IPs
+    # So we'll let Docker assign IPs automatically
     docker_cmd = [
         "docker", "run", "--rm",
         "--name", container_name,
-        "--network", DOCKER_NETWORK,
-        "--ip", ip_address,
+        "--network", network_name
+    ]
+    
+    # Only try to set IP if not using bridge network
+    if network_name != "bridge" and not USE_EXISTING_NETWORK:
+        docker_cmd.extend(["--ip", ip_address])
+    
+    docker_cmd.extend([
         "curlimages/curl:latest",
         "-s", "-w", '{"status":%{http_code},"time":%{time_total},"size":%{size_download}}',
         "-o", "/dev/null",
         "--max-time", str(TIMEOUT),
         "-H", "Accept-Encoding: gzip,default",
         URL
-    ]
+    ])
     
     start = time.perf_counter()
     try:
@@ -121,7 +168,7 @@ except:
     exit(1)
 
 # Setup
-setup_docker_network()
+network_name = setup_docker_network()
 ip_pool = generate_ips(TOTAL_REQUESTS)
 
 # Initialize CSV
@@ -149,7 +196,7 @@ try:
             for i in range(batch_size):
                 req_id = request_counter + i + 1
                 ip = ip_pool[request_counter + i]
-                futures.append(executor.submit(make_request_docker, req_id, ip))
+                futures.append(executor.submit(make_request_docker, req_id, ip, network_name))
             
             batch_results = [f.result() for f in as_completed(futures)]
         
@@ -183,7 +230,7 @@ try:
 
 finally:
     # Always cleanup
-    cleanup_docker_network()
+    cleanup_docker_network(network_name)
 
 # === Final Summary ===
 successes = [r for r in all_results if r["status"] == 200]
