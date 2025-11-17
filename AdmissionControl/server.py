@@ -3,6 +3,7 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import numpy as np
 import time
+import multiprocessing
 
 app = Flask(__name__)
 limiter = Limiter(
@@ -19,7 +20,8 @@ def matmul():
     b = np.random.randint(500, 1001, size=(200, 200), dtype=np.int32)
 
     # Perform matrix multiplication
-    result = np.matmul(a, b)
+    with multiprocessing.Pool() as pool:
+        result = pool.apply(np.matmul, args=(a, b))
 
     # Convert to a regular Python list (for JSON serialization)
     result_list = result.tolist()

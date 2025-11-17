@@ -13,13 +13,12 @@ TIMEOUT = 120
 
 # Find what network your server is using
 # Replace 'bridge' with your server's network name if different
-SERVER_NETWORK = "bridge"  # Common options: bridge, host, or custom network name
+SERVER_NETWORK = "server_default"  # Common options: bridge, host, or custom network name
 
 def make_request_docker(req_id):
-    """Run a single request in a Docker container."""
+    """Run a single request in a Docker container and capture container IP."""
     container_name = f"bench_req_{req_id}_{int(time.time() * 1000)}"
     
-    # Simple docker run command - let Docker assign IP automatically
     docker_cmd = [
         "docker", "run", "--rm",
         "--name", container_name,
@@ -31,13 +30,24 @@ def make_request_docker(req_id):
         "-H", "Accept-Encoding: gzip,default",
         URL
     ]
-    
+
     start = time.perf_counter()
     try:
-        result = subprocess.run(docker_cmd, capture_output=True, text=True, 
-                              timeout=TIMEOUT + 5, check=False)
+        result = subprocess.run(docker_cmd, capture_output=True, text=True,
+                                timeout=TIMEOUT + 5, check=False)
         elapsed = time.perf_counter() - start
-        
+
+        # --- NEW: Get IP using docker inspect ---
+        try:
+            inspect = subprocess.run(
+                ["docker", "inspect", container_name],
+                capture_output=True, text=True
+            )
+            inspect_json = json.loads(inspect.stdout)[0]
+            container_ip = list(inspect_json["NetworkSettings"]["Networks"].values())[0]["IPAddress"]
+        except:
+            container_ip = "unknown"
+
         # Parse curl output
         if result.returncode == 0 and result.stdout:
             try:
@@ -47,6 +57,7 @@ def make_request_docker(req_id):
                     "status": data["status"],
                     "time": data["time"],
                     "size": int(data["size"]),
+                    "container_ip": container_ip,
                     "error": None
                 }
             except json.JSONDecodeError:
@@ -55,6 +66,7 @@ def make_request_docker(req_id):
                     "status": "error",
                     "time": elapsed,
                     "size": 0,
+                    "container_ip": container_ip,
                     "error": f"Invalid response: {result.stdout}"
                 }
         else:
@@ -64,6 +76,7 @@ def make_request_docker(req_id):
                 "status": "error",
                 "time": elapsed,
                 "size": 0,
+                "container_ip": container_ip,
                 "error": error_msg
             }
     except subprocess.TimeoutExpired:
@@ -72,15 +85,8 @@ def make_request_docker(req_id):
             "status": "timeout",
             "time": TIMEOUT,
             "size": 0,
+            "container_ip": "unknown",
             "error": "Request timeout"
-        }
-    except Exception as e:
-        return {
-            "id": req_id,
-            "status": "error",
-            "time": None,
-            "size": 0,
-            "error": str(e)
         }
 
 # === Main Execution ===
@@ -123,7 +129,7 @@ elif "error" in test_result and test_result["error"]:
 # Initialize CSV
 with open("results.csv", "w", newline="") as f:
     csv.writer(f).writerow(["RequestID", "Status", "ResponseTime(s)", 
-                           "Size(bytes)", "Timestamp"])
+                       "Size(bytes)", "ContainerIP", "Timestamp"])
 
 print(f"Starting benchmark: {TOTAL_REQUESTS} requests, {CONCURRENCY} concurrent")
 print(f"Using network: {SERVER_NETWORK}\n")
@@ -154,7 +160,9 @@ for batch_num in range(batches):
             writer.writerow([
                 r["id"], r["status"],
                 f"{r['time']:.4f}" if r["time"] else "N/A",
-                r["size"], time.strftime("%Y-%m-%d %H:%M:%S")
+                r["size"],
+                r.get("container_ip", "unknown"),
+                time.strftime("%Y-%m-%d %H:%M:%S")
             ])
     
     all_results.extend(batch_results)
