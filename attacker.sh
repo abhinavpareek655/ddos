@@ -1,0 +1,1 @@
+ab -q -k -s 120 -n 10000 -c 100 -T 500000 -g a.dat -e a.csv -H "Accept-Encoding: gzip, deflate" http://10.198.19.133:5000/matmul >> a.txt
