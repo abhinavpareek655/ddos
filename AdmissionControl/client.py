@@ -10,7 +10,7 @@ TOTAL_REQUESTS = 25
 CONCURRENCY = 5
 COOLDOWN = 2
 TIMEOUT = 120
-SERVER_NETWORK = "server_default"
+SERVER_NETWORK = "calico_net"
 
 def make_request_docker(req_id):
     container_name = f"bench_req_{req_id}_{int(time.time() * 1000)}"
